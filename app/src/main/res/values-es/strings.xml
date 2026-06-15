@@ -918,4 +918,16 @@
     <string name="exception_install_failed_all_authorizers_failed">Todos los autorizadores fallaron</string>
     <string name="exception_install_failed_blocked_by_profile_signature_mismatch">El perfil bloquea la instalación de aplicaciones con una firma diferente</string>
     <string name="exception_install_failed_blocked_by_profile_signature_unknown">El perfil bloquea la instalación de aplicaciones cuya firma no puede verificarse</string>
+    <string name="installer_settings_signature_check">Comprobaciones de firmas</string>
+    <string name="config_check_app_signature">Comprobar las firmas de las aplicaciones</string>
+    <string name="config_check_app_signature_desc">Analizar las firmas de los APKs antes de la instalación y compararlas con las de las aplicaciones instaladas</string>
+    <string name="config_show_signature_info_on_match">Mostrar información para los estados de firma normales</string>
+    <string name="config_show_signature_info_on_match_desc">Mostrar avisos de firma para firmas coincidentes y nuevas instalaciones</string>
+    <string name="config_show_signature_details">Mostrar detalles de la firma</string>
+    <string name="config_show_signature_details_desc">Mostrar resúmenes de certificados, esquemas verificados, advertencias y errores en los avisos de firma</string>
+    <string name="tag_signature_match">Coincidencia de firmas</string>
+    <string name="tag_signature_rotation">Rotación de firmas</string>
+    <string name="tag_signature_rotation_unconfirmed">Rotación declarada</string>
+    <string name="installer_prepare_signature_new_install">Instalación nueva. No se encontró ninguna aplicación instalada con el mismo nombre de paquete.</string>
+    <string name="installer_prepare_signature_match">Coincidencia de firmas. El paquete actual utiliza el mismo conjunto de firmantes que la aplicación instalada.</string>
 </resources>
