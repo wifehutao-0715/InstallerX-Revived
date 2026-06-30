@@ -872,6 +872,8 @@ jobs:
       source_ref: ${{ steps.stable-ref.outputs.ref }}
       upstream_sha: ${{ steps.sha.outputs.upstream_sha }}
       version_name: ${{ steps.stable-ref.outputs.version_name }}
+      version_tag: ${{ steps.metadata.outputs.version_tag }}
+      short_sha: ${{ steps.metadata.outputs.short_sha }}
       retention_days: ${{ steps.source.outputs.retention_days }}
       channel: ${{ steps.source.outputs.channel }}
       level: ${{ steps.source.outputs.level }}
@@ -968,6 +970,23 @@ jobs:
       - name: Get source commit
         id: sha
         run: echo "upstream_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare PackageInstaller metadata
+        id: metadata
+        env:
+          VERSION_NAME: ${{ steps.stable-ref.outputs.version_name }}
+        run: |
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          DATE_TAG="$(git log -1 --format=%cd --date=format:%y.%m)"
+
+          if [ -n "${VERSION_NAME:-}" ]; then
+            VERSION_TAG="${VERSION_NAME}"
+          else
+            VERSION_TAG="${DATE_TAG}.${SHORT_SHA}"
+          fi
+
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "version_tag=${VERSION_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Restore successful-build marker
         id: restore-marker
@@ -1096,7 +1115,7 @@ jobs:
         env:
           ARTIFACT_SUFFIX: ${{ matrix.artifact_suffix }}
           APP_ID: ${{ matrix.app_id }}
-          VERSION_NAME: ${{ needs.packageinstaller-preflight.outputs.version_name }}
+          VERSION_TAG: ${{ needs.packageinstaller-preflight.outputs.version_tag }}
           LEVEL: ${{ needs.packageinstaller-preflight.outputs.level }}
           CHANNEL: ${{ needs.packageinstaller-preflight.outputs.channel }}
         run: |
@@ -1107,12 +1126,6 @@ jobs:
             echo "ERROR: APK not found in $APK_DIR."
             ls -R app/build/outputs/apk || true
             exit 1
-          fi
-
-          if [ -n "${VERSION_NAME:-}" ]; then
-            VERSION_TAG="${VERSION_NAME}"
-          else
-            VERSION_TAG="$(git log -1 --format=%cd --date=format:%y.%m)"
           fi
 
           SAFE_APP_ID="${APP_ID//./-}"
@@ -1151,11 +1164,134 @@ jobs:
           retention-days: ${{ needs.packageinstaller-preflight.outputs.retention_days }}
           archive: false
 
+  packageinstaller-release:
+    name: Release PackageInstaller ${{ needs.packageinstaller-preflight.outputs.channel }}
+    needs:
+      - packageinstaller-preflight
+      - packageinstaller-build
+    if: needs.packageinstaller-preflight.outputs.should_build == 'true' && success()
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+      packages: read
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v7
+        with:
+          pattern: '*online-${{ needs.packageinstaller-preflight.outputs.channel }}*'
+          path: release-output
+          merge-multiple: true
+
+      - name: Prepare release metadata
+        id: meta
+        env:
+          CHANNEL: ${{ needs.packageinstaller-preflight.outputs.channel }}
+          VERSION_TAG: ${{ needs.packageinstaller-preflight.outputs.version_tag }}
+          SOURCE_REPOSITORY: ${{ needs.packageinstaller-preflight.outputs.source_repository }}
+          SOURCE_REF: ${{ needs.packageinstaller-preflight.outputs.source_ref }}
+          SOURCE_SHA: ${{ needs.packageinstaller-preflight.outputs.upstream_sha }}
+          SHORT_SHA: ${{ needs.packageinstaller-preflight.outputs.short_sha }}
+        run: |
+          BUILD_TIME_HKT="$(TZ=Asia/Hong_Kong date '+%Y-%m-%d %H:%M:%S HKT')"
+          RELEASE_TAG="packageinstaller-online-${CHANNEL}-${VERSION_TAG}"
+
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "build_time_hkt=${BUILD_TIME_HKT}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "expected_assets<<EOF"
+            echo "InstallerX-Revived-online-${CHANNEL}-android-packageinstaller-${VERSION_TAG}.apk"
+            echo "InstallerX-Revived-online-${CHANNEL}-google-packageinstaller-${VERSION_TAG}.apk"
+            echo "AOSP-${VERSION_TAG}-online-${CHANNEL}.zip"
+            echo "Google-${VERSION_TAG}-online-${CHANNEL}.zip"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Release tag: ${RELEASE_TAG}"
+          echo "Build time: ${BUILD_TIME_HKT}"
+          echo "Source: ${SOURCE_REPOSITORY}@${SOURCE_SHA}"
+          echo "Source ref: ${SOURCE_REF}"
+          echo "Short SHA: ${SHORT_SHA}"
+
+      - name: Verify release assets
+        env:
+          EXPECTED_ASSETS: ${{ steps.meta.outputs.expected_assets }}
+        run: |
+          ls -la release-output
+
+          while IFS= read -r EXPECTED_ASSET; do
+            [ -z "$EXPECTED_ASSET" ] && continue
+            if [ ! -f "release-output/${EXPECTED_ASSET}" ]; then
+              echo "ERROR: Missing expected release asset: ${EXPECTED_ASSET}"
+              exit 1
+            fi
+          done <<< "$EXPECTED_ASSETS"
+
+      - name: Check existing local release
+        id: existing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.meta.outputs.release_tag }}
+          EXPECTED_ASSETS: ${{ steps.meta.outputs.expected_assets }}
+        run: |
+          EXISTS=false
+          REASON_FILE="$(mktemp)"
+
+          if git ls-remote --exit-code --tags "https://github.com/${CURRENT_REPOSITORY}.git" "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            EXISTS=true
+            echo "tag ${RELEASE_TAG} already exists in ${CURRENT_REPOSITORY}" >> "$REASON_FILE"
+          fi
+
+          RELEASE_ASSETS="$(gh release view "$RELEASE_TAG" -R "$CURRENT_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null || true)"
+          ALL_RELEASE_ASSETS="$(gh api --paginate "repos/${CURRENT_REPOSITORY}/releases?per_page=100" --jq '.[].assets[].name' 2>/dev/null || true)"
+
+          while IFS= read -r EXPECTED_ASSET; do
+            [ -z "$EXPECTED_ASSET" ] && continue
+            if printf '%s\n' "$RELEASE_ASSETS" "$ALL_RELEASE_ASSETS" | grep -Fxq "$EXPECTED_ASSET"; then
+              EXISTS=true
+              echo "asset ${EXPECTED_ASSET} already exists in ${CURRENT_REPOSITORY}" >> "$REASON_FILE"
+            fi
+          done <<< "$EXPECTED_ASSETS"
+
+          {
+            echo "exists=${EXISTS}"
+            echo "reason<<EOF"
+            sort -u "$REASON_FILE"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$EXISTS" = "true" ]; then
+            echo "Skipping ${RELEASE_TAG}; existing release/tag/assets found:"
+            sort -u "$REASON_FILE"
+          fi
+
+      - name: Create PackageInstaller release
+        if: steps.existing.outputs.exists != 'true'
+        uses: softprops/action-gh-release@v3
+        with:
+          name: PackageInstaller ${{ needs.packageinstaller-preflight.outputs.channel }} ${{ needs.packageinstaller-preflight.outputs.version_tag }} (${{ steps.meta.outputs.build_time_hkt }})
+          tag_name: ${{ steps.meta.outputs.release_tag }}
+          prerelease: ${{ needs.packageinstaller-preflight.outputs.channel != 'stable' }}
+          make_latest: false
+          body: |
+            Automated PackageInstaller ${{ needs.packageinstaller-preflight.outputs.channel }} release.
+
+            Build time: `${{ steps.meta.outputs.build_time_hkt }}`
+            Source: `${{ needs.packageinstaller-preflight.outputs.source_repository }}@${{ needs.packageinstaller-preflight.outputs.upstream_sha }}`
+            Source ref: `${{ needs.packageinstaller-preflight.outputs.source_ref }}`
+            APK versionCode is prefixed with `${{ needs.packageinstaller-preflight.outputs.version_code_prefix }}` for direct installation.
+
+            This workflow checks `${{ github.repository }}` for existing matching tags or assets before publishing.
+          files: release-output/*
+
   packageinstaller-remember-success:
     name: Remember PackageInstaller source commit
     needs:
       - packageinstaller-preflight
       - packageinstaller-build
+      - packageinstaller-release
     if: >
       needs.packageinstaller-preflight.outputs.should_build == 'true' &&
       needs.packageinstaller-preflight.outputs.cache_hit != 'true' &&
