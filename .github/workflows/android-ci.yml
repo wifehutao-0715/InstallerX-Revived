@@ -840,7 +840,6 @@ jobs:
           name: packageinstaller-${{ matrix.channel }}-${{ steps.meta.outputs.version_tag }}-release-assets
           path: release-output/*
           retention-days: ${{ inputs.retention_days || '30' }}
-          archive: false
 
       - name: Create PackageInstaller release
         if: steps.existing.outputs.exists != 'true'
