@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -49,14 +50,15 @@ if "fun Project.getVersionCode()" not in build_config_text:
     )
 
 app_gradle_text = app_gradle.read_text(encoding="utf-8")
-if "versionCode = project.getGitCommitCount()" in app_gradle_text:
-    app_gradle.write_text(
-        app_gradle_text.replace(
-            "versionCode = project.getGitCommitCount()",
-            "versionCode = project.getVersionCode()",
-            1,
-        ),
-        encoding="utf-8",
+if "versionCode = project.getVersionCode()" not in app_gradle_text:
+    updated_app_gradle_text, replacements = re.subn(
+        r"^(\s*versionCode\s*=\s*).+$",
+        r"\1project.getVersionCode()",
+        app_gradle_text,
+        count=1,
+        flags=re.MULTILINE,
     )
-elif "versionCode = project.getVersionCode()" not in app_gradle_text:
-    raise SystemExit("Could not find versionCode assignment in app/build.gradle.kts")
+    if replacements:
+        app_gradle.write_text(updated_app_gradle_text, encoding="utf-8")
+    else:
+        raise SystemExit("Could not find versionCode assignment in app/build.gradle.kts")
