@@ -23,6 +23,38 @@ fun Project.getGitCommitCount(): Int {
     }
 }
 
+fun Project.getVersionCode(): Int {
+    val explicitVersionCode = providers.gradleProperty("VERSION_CODE")
+        .orElse(providers.environmentVariable("VERSION_CODE"))
+        .orNull
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+
+    if (explicitVersionCode != null) {
+        return explicitVersionCode.toIntOrNull()
+            ?: error("VERSION_CODE must be an integer: $explicitVersionCode")
+    }
+
+    val baseVersionCode = getGitCommitCount()
+    val versionCodePrefix = providers.gradleProperty("VERSION_CODE_PREFIX")
+        .orElse(providers.environmentVariable("VERSION_CODE_PREFIX"))
+        .orNull
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?: return baseVersionCode
+
+    require(versionCodePrefix.all { it.isDigit() }) {
+        "VERSION_CODE_PREFIX must contain only digits: $versionCodePrefix"
+    }
+
+    val prefixedVersionCode = "$versionCodePrefix$baseVersionCode".toLong()
+    require(prefixedVersionCode <= Int.MAX_VALUE) {
+        "Prefixed VERSION_CODE $prefixedVersionCode exceeds ${Int.MAX_VALUE}"
+    }
+
+    return prefixedVersionCode.toInt()
+}
+
 // Get git commit hash safely, compatible with configuration cache
 fun Project.getGitHash(): String {
     return try {

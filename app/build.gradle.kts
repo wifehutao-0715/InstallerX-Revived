@@ -36,7 +36,7 @@ android {
         applicationId = project.findProperty("APP_ID") as String? ?: "com.rosan.installer.x.revived"
 
         // Version control retrieved from git, with a build-plugin fallback when git is unavailable.
-        versionCode = project.getGitCommitCount()
+        versionCode = project.getVersionCode()
         versionName = project.getBaseVersionName()
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

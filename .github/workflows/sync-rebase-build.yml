@@ -1,0 +1,272 @@
+name: Sync Rebase Build
+
+on:
+  schedule:
+    - cron: '30 17 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_repository:
+        description: 'Upstream repository to rebase from'
+        required: false
+        default: 'wxxsfxyzm/InstallerX-Revived'
+      branches:
+        description: 'Space-separated branches to compare and build'
+        required: false
+        default: 'main dev'
+      build_level:
+        description: 'Online PackageInstaller build level'
+        required: false
+        default: 'preview'
+        type: choice
+        options:
+          - preview
+          - stable
+          - unstable
+      version_name:
+        description: 'Optional VERSION_NAME override'
+        required: false
+        default: ''
+      app_version_code_prefix:
+        description: 'Prefix prepended to APK versionCode for direct installation'
+        required: false
+        default: '99999'
+      push_rebased_branch:
+        description: 'Push the rebased branch back to this repository'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      force_build:
+        description: 'Build even when branch SHAs already match'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      retention_days:
+        description: 'Artifact retention days'
+        required: false
+        default: '30'
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  detect:
+    name: Detect mismatched branches
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.matrix.outputs.has_changes }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Compare branches
+        id: matrix
+        env:
+          UPSTREAM_REPOSITORY: ${{ inputs.upstream_repository || 'wxxsfxyzm/InstallerX-Revived' }}
+          BRANCHES: ${{ inputs.branches || 'main dev' }}
+          FORCE_BUILD: ${{ inputs.force_build || 'false' }}
+        run: |
+          set -euo pipefail
+
+          UPSTREAM_URL="https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch origin '+refs/heads/*:refs/remotes/origin/*' --prune
+          git fetch upstream '+refs/heads/*:refs/remotes/upstream/*' --prune
+
+          BRANCH_FILE="$(mktemp)"
+
+          for BRANCH in $BRANCHES; do
+            if ! git rev-parse --verify "origin/${BRANCH}" >/dev/null 2>&1; then
+              echo "Skipping ${BRANCH}: origin branch not found."
+              continue
+            fi
+
+            if ! git rev-parse --verify "upstream/${BRANCH}" >/dev/null 2>&1; then
+              echo "Skipping ${BRANCH}: upstream branch not found."
+              continue
+            fi
+
+            ORIGIN_SHA="$(git rev-parse "origin/${BRANCH}")"
+            UPSTREAM_SHA="$(git rev-parse "upstream/${BRANCH}")"
+
+            if [ "$FORCE_BUILD" = "true" ] || [ "$ORIGIN_SHA" != "$UPSTREAM_SHA" ]; then
+              printf '%s\t%s\t%s\n' "$BRANCH" "$ORIGIN_SHA" "$UPSTREAM_SHA" >> "$BRANCH_FILE"
+              echo "Will build ${BRANCH}: origin ${ORIGIN_SHA}, upstream ${UPSTREAM_SHA}."
+            else
+              echo "Skipping ${BRANCH}: already aligned at ${ORIGIN_SHA}."
+            fi
+          done
+
+          python3 - "$BRANCH_FILE" "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import sys
+
+          rows = []
+          with open(sys.argv[1], "r", encoding="utf-8") as branch_file:
+              for line in branch_file:
+                  branch, origin_sha, upstream_sha = line.rstrip("\n").split("\t")
+                  rows.append({
+                      "branch": branch,
+                      "origin_sha": origin_sha,
+                      "upstream_sha": upstream_sha,
+                      "safe_branch": branch.replace("/", "-"),
+                  })
+
+          with open(sys.argv[2], "a", encoding="utf-8") as output:
+              output.write(f"has_changes={'true' if rows else 'false'}\n")
+              output.write(f"matrix={json.dumps({'include': rows}, separators=(',', ':'))}\n")
+          PY
+
+  rebase-build:
+    name: Rebase and build ${{ matrix.branch }}
+    needs: detect
+    if: needs.detect.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ matrix.branch }}
+
+      - name: Rebase from upstream
+        env:
+          BRANCH: ${{ matrix.branch }}
+          UPSTREAM_REPOSITORY: ${{ inputs.upstream_repository || 'wxxsfxyzm/InstallerX-Revived' }}
+          PUSH_REBASED_BRANCH: ${{ inputs.push_rebased_branch || 'false' }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch origin "${BRANCH}"
+          git fetch upstream "${BRANCH}"
+          git checkout -B "${BRANCH}" "origin/${BRANCH}"
+          git pull --rebase upstream "${BRANCH}"
+
+          if [ "$PUSH_REBASED_BRANCH" = "true" ]; then
+            git push --force-with-lease origin "HEAD:${BRANCH}"
+          fi
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: '25'
+
+      - name: Use CI-provided JDK for Gradle
+        run: rm -f gradle/gradle-daemon-jvm.properties
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          build-scan-terms-of-use-url: https://gradle.com/help/legal-terms-of-use
+          build-scan-terms-of-use-agree: 'yes'
+          build-scan-publish: false
+          cache-read-only: ${{ github.ref_name != 'main' }}
+          cache-encryption-key: ${{ secrets.GRADLE_CACHE_ENCRYPTION_KEY }}
+
+      - name: Decode and set up signing key
+        env:
+          SIGNING_KEY_STORE_BASE64: ${{ secrets.SIGNING_KEY_STORE_BASE64 }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          if [ -z "${SIGNING_STORE_PASSWORD:-}" ] || [ -z "${SIGNING_KEY_STORE_BASE64:-}" ] || [ -z "${SIGNING_KEY_PASSWORD:-}" ] || [ -z "${SIGNING_KEY_ALIAS:-}" ]; then
+            echo "Signing secrets are incomplete. The project will fall back to the debug keystore."
+            exit 0
+          fi
+          mkdir -p keystore
+          echo "${SIGNING_KEY_STORE_BASE64}" | base64 --decode > keystore/carlyu.jks
+          echo "storeFile=keystore/carlyu.jks" > keystore.properties
+          echo "keyAlias=${SIGNING_KEY_ALIAS}" >> keystore.properties
+          echo "keyPassword=${SIGNING_KEY_PASSWORD}" >> keystore.properties
+          echo "storePassword=${SIGNING_STORE_PASSWORD}" >> keystore.properties
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
+
+      - name: Build direct-install PackageInstaller APKs
+        env:
+          BRANCH: ${{ matrix.branch }}
+          SAFE_BRANCH: ${{ matrix.safe_branch }}
+          BUILD_LEVEL: ${{ inputs.build_level || 'preview' }}
+          VERSION_NAME: ${{ inputs.version_name }}
+          VERSION_CODE_PREFIX: ${{ inputs.app_version_code_prefix || '99999' }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          case "$BUILD_LEVEL" in
+            preview)
+              LEVEL="Preview"
+              CHANNEL="preview"
+              ;;
+            stable)
+              LEVEL="Stable"
+              CHANNEL="stable"
+              ;;
+            unstable)
+              LEVEL="Unstable"
+              CHANNEL="unstable"
+              ;;
+            *)
+              echo "Unsupported build_level: $BUILD_LEVEL"
+              exit 1
+              ;;
+          esac
+
+          VERSION_ARGS=()
+          if [ -n "${VERSION_NAME:-}" ]; then
+            VERSION_ARGS=(-PVERSION_NAME="${VERSION_NAME}")
+            VERSION_TAG="${VERSION_NAME}"
+          else
+            VERSION_TAG="$(git log -1 --format=%cd --date=format:%y.%m)-$(git rev-parse --short=7 HEAD)"
+          fi
+
+          mkdir -p artifacts
+
+          for ITEM in \
+            "android-packageinstaller:com.android.packageinstaller" \
+            "google-packageinstaller:com.google.android.packageinstaller"
+          do
+            ARTIFACT_SUFFIX="${ITEM%%:*}"
+            APP_ID="${ITEM#*:}"
+
+            ./gradlew clean "assembleOnline${LEVEL}Release" -PAPP_ID="${APP_ID}" "${VERSION_ARGS[@]}"
+
+            APK_DIR="app/build/outputs/apk/online${LEVEL}/release"
+            ORIGINAL_APK=$(find "$APK_DIR" -maxdepth 1 -type f -name "*.apk" | head -n 1)
+
+            if [ -z "$ORIGINAL_APK" ]; then
+              echo "ERROR: APK not found in $APK_DIR."
+              ls -R app/build/outputs/apk || true
+              exit 1
+            fi
+
+            NEW_APK_NAME="InstallerX-Revived-${SAFE_BRANCH}-online-${CHANNEL}-${ARTIFACT_SUFFIX}-${VERSION_TAG}.apk"
+            cp "$ORIGINAL_APK" "artifacts/${NEW_APK_NAME}"
+          done
+
+      - name: Upload rebased APKs
+        uses: actions/upload-artifact@v7
+        with:
+          name: rebased-${{ matrix.safe_branch }}-${{ inputs.build_level || 'preview' }}-packageinstaller-apks
+          path: artifacts/*.apk
+          retention-days: ${{ inputs.retention_days || '30' }}
+          archive: false
