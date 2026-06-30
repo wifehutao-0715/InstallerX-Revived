@@ -24,6 +24,7 @@ on:
           - packageinstaller
           - preview-release
           - stable-release
+          - packageinstaller-all-release
           - dev-artifact
           - pr-debug
           - codeql
@@ -577,6 +578,288 @@ jobs:
         with:
           category: /language:${{ matrix.language }}
 
+  packageinstaller-all-release:
+    name: Release PackageInstaller ${{ matrix.channel }}
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'packageinstaller-all-release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - channel: preview
+            level: Preview
+            default_ref: dev
+          - channel: stable
+            level: Stable
+            default_ref: latest-stable
+          - channel: unstable
+            level: Unstable
+            default_ref: dev
+    steps:
+      - name: Resolve source
+        id: source
+        env:
+          SOURCE_REPOSITORY: ${{ inputs.source_repository || 'wxxsfxyzm/InstallerX-Revived' }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          DEFAULT_REF: ${{ matrix.default_ref }}
+          CHANNEL: ${{ matrix.channel }}
+          VERSION_NAME: ${{ inputs.version_name }}
+        run: |
+          REQUESTED_REF="${SOURCE_REF:-$DEFAULT_REF}"
+          RESOLVED_REF="$REQUESTED_REF"
+          RESOLVED_VERSION="$VERSION_NAME"
+
+          if [ "$CHANNEL" = "stable" ] && { [ -z "$RESOLVED_REF" ] || [ "$RESOLVED_REF" = "latest-stable" ]; }; then
+            RESOLVED_REF="$(git ls-remote --tags --refs "https://github.com/${SOURCE_REPOSITORY}.git" \
+              | awk -F/ '{print $NF}' \
+              | grep -E '^[0-9]+\.[0-9]+(\.[0-9]+)?$' \
+              | sort -V \
+              | tail -n 1)"
+
+            if [ -z "$RESOLVED_REF" ]; then
+              echo "ERROR: Could not resolve a stable tag from ${SOURCE_REPOSITORY}."
+              exit 1
+            fi
+
+            if [ -z "$RESOLVED_VERSION" ]; then
+              RESOLVED_VERSION="$RESOLVED_REF"
+            fi
+          fi
+
+          echo "repository=${SOURCE_REPOSITORY}" >> "$GITHUB_OUTPUT"
+          echo "ref=${RESOLVED_REF}" >> "$GITHUB_OUTPUT"
+          echo "version_name=${RESOLVED_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ steps.source.outputs.repository }}
+          fetch-depth: 0
+          ref: ${{ steps.source.outputs.ref }}
+
+      - name: Checkout CI scripts
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: .ci-workflow
+          sparse-checkout: |
+            .github/scripts
+          sparse-checkout-cone-mode: false
+
+      - name: Prepare release metadata
+        id: meta
+        env:
+          CHANNEL: ${{ matrix.channel }}
+          LEVEL: ${{ matrix.level }}
+          RESOLVED_REF: ${{ steps.source.outputs.ref }}
+          RESOLVED_VERSION: ${{ steps.source.outputs.version_name }}
+          INPUT_VERSION_NAME: ${{ inputs.version_name }}
+        run: |
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          SOURCE_SHA="$(git rev-parse HEAD)"
+          DATE_TAG="$(git log -1 --format=%cd --date=format:%y.%m)"
+
+          if [ -n "${INPUT_VERSION_NAME:-}" ]; then
+            VERSION_TAG="$INPUT_VERSION_NAME"
+            GRADLE_VERSION_NAME="$INPUT_VERSION_NAME"
+          elif [ "$CHANNEL" = "stable" ] && [ -n "${RESOLVED_VERSION:-}" ]; then
+            VERSION_TAG="$RESOLVED_VERSION"
+            GRADLE_VERSION_NAME="$RESOLVED_VERSION"
+          elif [ "$CHANNEL" = "stable" ] && [[ "$RESOLVED_REF" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            VERSION_TAG="$RESOLVED_REF"
+            GRADLE_VERSION_NAME="$RESOLVED_REF"
+          else
+            VERSION_TAG="${DATE_TAG}.${SHORT_SHA}"
+            GRADLE_VERSION_NAME=""
+          fi
+
+          RELEASE_TAG="packageinstaller-online-${CHANNEL}-${VERSION_TAG}"
+
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "source_sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "version_tag=${VERSION_TAG}" >> "$GITHUB_OUTPUT"
+          echo "gradle_version_name=${GRADLE_VERSION_NAME}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "expected_assets<<EOF"
+            echo "InstallerX-Revived-online-${CHANNEL}-android-packageinstaller-${VERSION_TAG}.apk"
+            echo "InstallerX-Revived-online-${CHANNEL}-google-packageinstaller-${VERSION_TAG}.apk"
+            echo "AOSP-${VERSION_TAG}-online-${CHANNEL}.zip"
+            echo "Google-${VERSION_TAG}-online-${CHANNEL}.zip"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check existing local releases
+        id: existing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.meta.outputs.release_tag }}
+          EXPECTED_ASSETS: ${{ steps.meta.outputs.expected_assets }}
+        run: |
+          EXISTS=false
+          REASON_FILE="$(mktemp)"
+
+          if git ls-remote --exit-code --tags "https://github.com/${CURRENT_REPOSITORY}.git" "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            EXISTS=true
+            echo "tag ${RELEASE_TAG} already exists in ${CURRENT_REPOSITORY}" >> "$REASON_FILE"
+          fi
+
+          RELEASE_ASSETS="$(gh release view "$RELEASE_TAG" -R "$CURRENT_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null || true)"
+          ALL_RELEASE_ASSETS="$(gh api --paginate "repos/${CURRENT_REPOSITORY}/releases?per_page=100" --jq '.[].assets[].name' 2>/dev/null || true)"
+
+          while IFS= read -r EXPECTED_ASSET; do
+            [ -z "$EXPECTED_ASSET" ] && continue
+            if printf '%s\n' "$RELEASE_ASSETS" "$ALL_RELEASE_ASSETS" | grep -Fxq "$EXPECTED_ASSET"; then
+              EXISTS=true
+              echo "asset ${EXPECTED_ASSET} already exists in ${CURRENT_REPOSITORY}" >> "$REASON_FILE"
+            fi
+          done <<< "$EXPECTED_ASSETS"
+
+          {
+            echo "exists=${EXISTS}"
+            echo "reason<<EOF"
+            sort -u "$REASON_FILE"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$EXISTS" = "true" ]; then
+            echo "Skipping ${RELEASE_TAG}; existing release/tag/assets found:"
+            sort -u "$REASON_FILE"
+          fi
+
+      - name: Set up JDK 25
+        if: steps.existing.outputs.exists != 'true'
+        uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: '25'
+
+      - name: Use CI-provided JDK for Gradle
+        if: steps.existing.outputs.exists != 'true'
+        run: rm -f gradle/gradle-daemon-jvm.properties
+
+      - name: Setup Gradle
+        if: steps.existing.outputs.exists != 'true'
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          build-scan-terms-of-use-url: https://gradle.com/help/legal-terms-of-use
+          build-scan-terms-of-use-agree: 'yes'
+          build-scan-publish: false
+          cache-read-only: true
+          cache-encryption-key: ${{ secrets.GRADLE_CACHE_ENCRYPTION_KEY }}
+
+      - name: Decode and set up signing key
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          SIGNING_KEY_STORE_BASE64: ${{ secrets.SIGNING_KEY_STORE_BASE64 }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          if [ -z "${SIGNING_STORE_PASSWORD:-}" ] || [ -z "${SIGNING_KEY_STORE_BASE64:-}" ] || [ -z "${SIGNING_KEY_PASSWORD:-}" ] || [ -z "${SIGNING_KEY_ALIAS:-}" ]; then
+            echo "Signing secrets are incomplete. The project will fall back to the debug keystore."
+            exit 0
+          fi
+          mkdir -p keystore
+          echo "${SIGNING_KEY_STORE_BASE64}" | base64 --decode > keystore/carlyu.jks
+          echo "storeFile=keystore/carlyu.jks" > keystore.properties
+          echo "keyAlias=${SIGNING_KEY_ALIAS}" >> keystore.properties
+          echo "keyPassword=${SIGNING_KEY_PASSWORD}" >> keystore.properties
+          echo "storePassword=${SIGNING_STORE_PASSWORD}" >> keystore.properties
+
+      - name: Grant execute permission for gradlew
+        if: steps.existing.outputs.exists != 'true'
+        run: chmod +x ./gradlew
+
+      - name: Inject CI versionCode prefix support
+        if: steps.existing.outputs.exists != 'true'
+        run: python3 .ci-workflow/.github/scripts/inject-version-code-prefix.py
+
+      - name: Build release assets
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          CHANNEL: ${{ matrix.channel }}
+          LEVEL: ${{ matrix.level }}
+          VERSION_TAG: ${{ steps.meta.outputs.version_tag }}
+          GRADLE_VERSION_NAME: ${{ steps.meta.outputs.gradle_version_name }}
+          VERSION_CODE_PREFIX: ${{ inputs.app_version_code_prefix || '99999' }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p release-output
+          VERSION_ARGS=()
+          if [ -n "${GRADLE_VERSION_NAME:-}" ]; then
+            VERSION_ARGS=(-PVERSION_NAME="${GRADLE_VERSION_NAME}")
+          fi
+
+          for ITEM in \
+            "AOSP:android-packageinstaller:com.android.packageinstaller" \
+            "Google:google-packageinstaller:com.google.android.packageinstaller"
+          do
+            MODULE_VARIANT="${ITEM%%:*}"
+            REST="${ITEM#*:}"
+            ARTIFACT_SUFFIX="${REST%%:*}"
+            APP_ID="${REST#*:}"
+
+            ./gradlew clean "assembleOnline${LEVEL}Release" -PAPP_ID="${APP_ID}" "${VERSION_ARGS[@]}"
+
+            APK_DIR="app/build/outputs/apk/online${LEVEL}/release"
+            ORIGINAL_APK="$(find "$APK_DIR" -maxdepth 1 -type f -name "*.apk" | head -n 1)"
+
+            if [ -z "$ORIGINAL_APK" ]; then
+              echo "ERROR: APK not found in $APK_DIR."
+              ls -R app/build/outputs/apk || true
+              exit 1
+            fi
+
+            APK_NAME="InstallerX-Revived-online-${CHANNEL}-${ARTIFACT_SUFFIX}-${VERSION_TAG}.apk"
+            APK_PATH="release-output/${APK_NAME}"
+            cp "$ORIGINAL_APK" "$APK_PATH"
+
+            APK_PATH="$APK_PATH" \
+              APP_ID="$APP_ID" \
+              MODULE_VARIANT="$MODULE_VARIANT" \
+              VERSION_TAG="$VERSION_TAG" \
+              CHANNEL="$CHANNEL" \
+              GITHUB_OUTPUT= \
+              bash .ci-workflow/.github/scripts/build-packageinstaller-module.sh
+
+            cp "module-output/${MODULE_VARIANT}-${VERSION_TAG}-online-${CHANNEL}.zip" release-output/
+          done
+
+      - name: Upload release bundle artifact
+        if: steps.existing.outputs.exists != 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: packageinstaller-${{ matrix.channel }}-${{ steps.meta.outputs.version_tag }}-release-assets
+          path: release-output/*
+          retention-days: ${{ inputs.retention_days || '30' }}
+          archive: false
+
+      - name: Create PackageInstaller release
+        if: steps.existing.outputs.exists != 'true'
+        uses: softprops/action-gh-release@v3
+        with:
+          name: PackageInstaller ${{ matrix.channel }} ${{ steps.meta.outputs.version_tag }}
+          tag_name: ${{ steps.meta.outputs.release_tag }}
+          prerelease: ${{ matrix.channel != 'stable' }}
+          make_latest: false
+          body: |
+            Automated PackageInstaller ${{ matrix.channel }} release.
+
+            Source: `${{ steps.source.outputs.repository }}@${{ steps.meta.outputs.source_sha }}`
+            Source ref: `${{ steps.source.outputs.ref }}`
+            APK versionCode is prefixed with `${{ inputs.app_version_code_prefix || '99999' }}` for direct installation.
+
+            This workflow checks `${{ github.repository }}` for existing matching tags or assets before publishing.
+          files: release-output/*
+
   packageinstaller-preflight:
     name: PackageInstaller preflight
     if: >
@@ -752,70 +1035,7 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Inject CI versionCode prefix support
-        run: |
-          python3 <<'PY'
-          from pathlib import Path
-
-          build_config = Path("build-plugins/src/main/kotlin/BuildConfig.kt")
-          app_gradle = Path("app/build.gradle.kts")
-
-          version_code_helper = r'''
-          fun Project.getVersionCode(): Int {
-              val explicitVersionCode = providers.gradleProperty("VERSION_CODE")
-                  .orElse(providers.environmentVariable("VERSION_CODE"))
-                  .orNull
-                  ?.trim()
-                  ?.takeIf { it.isNotEmpty() }
-
-              if (explicitVersionCode != null) {
-                  return explicitVersionCode.toIntOrNull()
-                      ?: error("VERSION_CODE must be an integer: $explicitVersionCode")
-              }
-
-              val baseVersionCode = getGitCommitCount()
-              val versionCodePrefix = providers.gradleProperty("VERSION_CODE_PREFIX")
-                  .orElse(providers.environmentVariable("VERSION_CODE_PREFIX"))
-                  .orNull
-                  ?.trim()
-                  ?.takeIf { it.isNotEmpty() }
-                  ?: return baseVersionCode
-
-              require(versionCodePrefix.all { it.isDigit() }) {
-                  "VERSION_CODE_PREFIX must contain only digits: $versionCodePrefix"
-              }
-
-              val prefixedVersionCode = "$versionCodePrefix$baseVersionCode".toLong()
-              require(prefixedVersionCode <= Int.MAX_VALUE) {
-                  "Prefixed VERSION_CODE $prefixedVersionCode exceeds ${Int.MAX_VALUE}"
-              }
-
-              return prefixedVersionCode.toInt()
-          }
-          '''
-
-          build_config_text = build_config.read_text(encoding="utf-8")
-          if "fun Project.getVersionCode()" not in build_config_text:
-              marker = "\n// Get git commit hash safely"
-              if marker not in build_config_text:
-                  raise SystemExit("Could not find insertion point in BuildConfig.kt")
-              build_config.write_text(
-                  build_config_text.replace(marker, "\n" + version_code_helper.strip() + "\n" + marker, 1),
-                  encoding="utf-8",
-              )
-
-          app_gradle_text = app_gradle.read_text(encoding="utf-8")
-          if "versionCode = project.getGitCommitCount()" in app_gradle_text:
-              app_gradle.write_text(
-                  app_gradle_text.replace(
-                      "versionCode = project.getGitCommitCount()",
-                      "versionCode = project.getVersionCode()",
-                      1,
-                  ),
-                  encoding="utf-8",
-              )
-          elif "versionCode = project.getVersionCode()" not in app_gradle_text:
-              raise SystemExit("Could not find versionCode assignment in app/build.gradle.kts")
-          PY
+        run: python3 .ci-workflow/.github/scripts/inject-version-code-prefix.py
 
       - name: Set up JDK 25
         uses: actions/setup-java@v5
