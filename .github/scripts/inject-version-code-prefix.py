@@ -18,7 +18,10 @@ fun Project.getVersionCode(): Int {
             ?: error("VERSION_CODE must be an integer: $explicitVersionCode")
     }
 
-    val baseVersionCode = getGitCommitCount()
+    val baseVersionCode = providers.exec {
+        commandLine("git", "rev-list", "--count", "HEAD")
+    }.standardOutput.asText.get().trim().toIntOrNull()
+        ?: error("Could not determine git commit count")
     val versionCodePrefix = providers.gradleProperty("VERSION_CODE_PREFIX")
         .orElse(providers.environmentVariable("VERSION_CODE_PREFIX"))
         .orNull
