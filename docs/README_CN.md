@@ -7,6 +7,14 @@
 [![Prerelease](https://img.shields.io/github/v/release/wxxsfxyzm/InstallerX?include_prereleases&label=测试版)](https://github.com/wxxsfxyzm/InstallerX/releases)
 [![Telegram](https://img.shields.io/badge/Telegram-2CA5E0?logo=telegram&logoColor=white)](https://t.me/installerx_revived)
 
+## 项目范围说明
+
+本仓库仅针对上游 InstallerX Revived 项目的提交进行自动打包，生成对应的模块和 APK 产物用于安装。
+
+APK 的 `versionCode` 会被有意调大，方便不想安装模块的用户通过核心破解直接安装 APK 来替换系统自带安装器，避免替换包因版本号过低而在重启后被系统恢复或覆盖。
+
+如遇 bug，请先确认该问题能否在上游原项目产物中复现。若问题由本仓库的打包、`versionCode` 覆写或自动发布流程导致，请勿直接向上游原项目反馈。
+
 > A modern and functional Android app installer. (You know some birds are not meant to be caged, their feathers are just too bright.)
 
 一款应用安装程序，为什么不试试 **InstallerX**？

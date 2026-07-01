@@ -7,6 +7,14 @@
 [![Prerelease](https://img.shields.io/github/v/release/wxxsfxyzm/InstallerX?include_prereleases&label=Beta)](https://github.com/wxxsfxyzm/InstallerX/releases)
 [![Telegram](https://img.shields.io/badge/Telegram-2CA5E0?logo=telegram&logoColor=white)](https://t.me/installerx_revived)
 
+## Hinweis zum Projektumfang
+
+Dieses Repository paketiert nur automatisch Commits aus dem upstream InstallerX Revived-Projekt und erzeugt die passenden Module und APK-Artefakte zur Installation.
+
+Der APK-`versionCode` wird absichtlich erhöht, damit Nutzer, die kein Modul installieren möchten, das APK direkt mit Core Patch installieren und den System-Paketinstaller ersetzen können. Dadurch wird verhindert, dass das System den Ersatz nach einem Neustart wiederherstellt oder überschreibt, weil dessen Versionscode zu niedrig ist.
+
+Wenn du einen Bug findest, prüfe bitte zuerst, ob er mit den originalen upstream-Artefakten reproduzierbar ist. Probleme, die durch das Packaging dieses Repositorys, die `versionCode`-Überschreibung oder die Release-Automatisierung entstehen, sollten nicht direkt an das upstream-Projekt gemeldet werden.
+
 > Ein moderner und funktionaler Android-App-Installer. (Manche Vögel sind nicht dafür gemacht, eingesperrt zu werden, ihre Federn sind einfach zu hell.)
 
 Du suchst nach einem besseren App-Installer? Probiere **InstallerX**.

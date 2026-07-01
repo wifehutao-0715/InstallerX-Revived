@@ -7,6 +7,14 @@
 [![ベータ版](https://img.shields.io/github/v/release/wxxsfxyzm/InstallerX?include_prereleases&label=ベータ版)](https://github.com/wxxsfxyzm/InstallerX/releases)
 [![Telegram](https://img.shields.io/badge/Telegram-2CA5E0?logo=telegram&logoColor=white)](https://t.me/installerx_revived)
 
+## プロジェクト範囲に関する注意
+
+このリポジトリは、上流の InstallerX Revived プロジェクトのコミットを自動的にパッケージ化し、インストール用の対応するモジュールと APK 成果物を生成するだけのものです。
+
+APK の `versionCode` は意図的に大きくしています。モジュールをインストールしたくないユーザーが Core Patch を使って APK を直接インストールし、システム標準のパッケージインストーラーを置き換えられるようにするためです。これにより、置き換えた APK のバージョンコードが低すぎることで、再起動後にシステムによって復元または上書きされることを防ぎます。
+
+不具合が発生した場合は、まず上流プロジェクトの元の成果物でも再現できるか確認してください。このリポジトリのパッケージング、`versionCode` の上書き、または自動リリース処理が原因の問題は、上流プロジェクトへ直接報告しないでください。
+
 > モダンで機能的な Android アプリインストーラー。（鳥の中には、檻に入れるべきではないものもいます。その羽はあまりにも鮮やかだからです。）
 
 より良いアプリインストーラーを探していますか？ **InstallerX** を試してみてください。
